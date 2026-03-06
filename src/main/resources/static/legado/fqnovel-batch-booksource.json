@@ -1,0 +1,59 @@
+[
+  {
+    "bookSourceComment": "FQNovel 批量预取版（单章请求会在服务端自动批量预取并缓存）",
+    "bookSourceGroup": "FQNovel",
+    "bookSourceName": "FQNovel-unidbg-批量预取",
+    "bookSourceType": 0,
+    "bookSourceUrl": "http://127.0.0.1:9999",
+    "customOrder": 1,
+    "enabled": true,
+    "enabledCookieJar": true,
+    "enabledExplore": true,
+    "exploreUrl": "搜索::http://127.0.0.1:9999/api/fqsearch/books?query={{key}}&offset={{(page-1)*20}}&count=20",
+    "header": "Content-Type: application/json\nUser-Agent: Mozilla/5.0",
+    "respondTime": 180000,
+    "ruleBookInfo": {
+      "author": "$.data.author",
+      "coverUrl": "$.data.coverUrl",
+      "intro": "$.data.description",
+      "kind": "$.data.category",
+      "lastChapter": "$.data.lastChapterTitle",
+      "name": "$.data.bookName",
+      "tocUrl": "http://127.0.0.1:9999/api/fqsearch/directory/{{$.data.bookId}}\n<js>\njava.put(\"book_id\", java.getString(\"$.data.bookId\"))\nresult\n</js>",
+      "wordCount": "$.data.wordNumber"
+    },
+    "ruleContent": {
+      "content": "$.data.txtContent",
+      "title": "$.data.title"
+    },
+    "ruleExplore": {
+      "author": "$.author",
+      "bookList": "$.data.books[*]",
+      "bookUrl": "http://127.0.0.1:9999/api/fqnovel/book/{{$.bookId}}",
+      "coverUrl": "$.coverUrl",
+      "intro": "$.description",
+      "kind": "$.category",
+      "lastChapter": "$.lastChapterTitle",
+      "name": "$.bookName",
+      "wordCount": "$.wordCount"
+    },
+    "ruleSearch": {
+      "author": "$.author",
+      "bookList": "$.data.books[*]",
+      "bookUrl": "http://127.0.0.1:9999/api/fqnovel/book/{{$.bookId}}",
+      "coverUrl": "$.coverUrl",
+      "intro": "$.description",
+      "kind": "$.category",
+      "lastChapter": "$.lastChapterTitle",
+      "name": "$.bookName",
+      "wordCount": "$.wordCount"
+    },
+    "ruleToc": {
+      "chapterList": "$.data.item_data_list[*]",
+      "chapterName": "$.title",
+      "chapterUrl": "@js:\nsource.bookSourceUrl + `/api/fqnovel/chapter/${java.get(\"book_id\")}/${java.getString(\"$.item_id\")}`"
+    },
+    "searchUrl": "http://127.0.0.1:9999/api/fqsearch/books?query={{key}}&offset={{(page-1)*20}}&count=20&tabType=3",
+    "weight": 0
+  }
+]

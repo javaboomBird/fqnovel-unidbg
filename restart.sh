@@ -1,18 +1,42 @@
 #!/bin/bash
 set -e  # 遇到错误立即退出
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$PROJECT_DIR"
+
 echo "[$(date)] 正在重启项目..."
+
+# 优先使用 JDK 17（该项目在较新 JDK 上可能出现 Lombok 兼容问题）
+if command -v /usr/libexec/java_home >/dev/null 2>&1; then
+  JAVA17_HOME=$(/usr/libexec/java_home -v 17 2>/dev/null || true)
+  if [ -n "$JAVA17_HOME" ]; then
+    export JAVA_HOME="$JAVA17_HOME"
+    export PATH="$JAVA_HOME/bin:$PATH"
+    echo "[$(date)] 使用 JAVA_HOME: $JAVA_HOME"
+  fi
+fi
+
+# 选择可用的 Maven 命令
+if [ -f "./mvnw" ] && [ -x "./mvnw" ]; then
+  MVN_CMD="./mvnw"
+else
+  MVN_CMD="mvn"
+fi
+echo "[$(date)] 使用 Maven 命令: $MVN_CMD"
 
 # 第一步：请求注册接口（无参，生成随机真实设备并写入配置）
 echo "[$(date)] 调用注册接口，写入新设备配置..."
-curl -sf -X POST 'http://localhost:9999/api/device/register-and-restart' \
+if curl -sf -X POST 'http://localhost:9999/api/device/register-and-restart' \
   -H 'Content-Type: application/json' \
-  -d '{}' > /dev/null
-echo "[$(date)] 注册接口调用成功，准备重启进程..."
-sleep 5
+  -d '{}' > /dev/null; then
+  echo "[$(date)] 注册接口调用成功，准备重启进程..."
+  sleep 5
+else
+  echo "[$(date)] 警告: 注册接口不可用（可能是首次启动），继续执行重启流程..."
+fi
 
 # 重新打包项目
 echo "[$(date)] 重新打包项目..."
-mvn package -DskipTests
+$MVN_CMD package -DskipTests
 if [ $? -ne 0 ]; then
     echo "[$(date)] 错误: Maven打包失败"
     exit 1
@@ -44,7 +68,6 @@ fi
 
 # 启动新的JAR文件
 echo "[$(date)] 启动JAR文件: target/unidbg-boot-server-0.0.1-SNAPSHOT.jar"
-cd "/Users/edy/code/cursor/nixiang/douyinsix/fqnovel-unidbg"
 nohup java -jar "target/unidbg-boot-server-0.0.1-SNAPSHOT.jar" >> target/spring-boot.log 2>&1 &
 JAVA_PID=$!
 echo "[$(date)] 新进程PID: $JAVA_PID"

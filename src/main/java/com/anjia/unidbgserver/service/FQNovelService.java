@@ -52,8 +52,12 @@ public class FQNovelService {
     @Resource
     private DeviceManagementService deviceManagementService;
 
+    @Resource
+    private RedisService redisService;
+
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private static final int SINGLE_CHAPTER_PREFETCH_SIZE = 30;
 
     // 默认FQ变量配置
     private FqVariable defaultFqVariable;
@@ -397,78 +401,56 @@ public class FQNovelService {
                     return FQNovelResponse.error("书籍ID和章节ID不能为空");
                 }
 
-                // 使用batch_full API获取完整响应数据
-                String itemIds = request.getChapterId();
-                FQNovelResponse<FqIBatchFullResponse> batchResponse = batchFull(itemIds, request.getBookId(), false).get();
+                String bookId = request.getBookId().trim();
+                String requestedChapterId = request.getChapterId().trim();
+
+                // 优先返回缓存，减少接口频率
+                FQNovelChapterInfo cachedChapter = redisService.getChapter(bookId, requestedChapterId);
+                if (cachedChapter != null) {
+                    log.info("章节缓存命中 - bookId: {}, chapterId: {}", bookId, requestedChapterId);
+                    return FQNovelResponse.success(cachedChapter);
+                }
+
+                // 单章请求实际使用批量预取，降低风控概率
+                PrefetchPlan prefetchPlan = buildSingleChapterPrefetchPlan(bookId, requestedChapterId);
+                String itemIds = String.join(",", prefetchPlan.itemIds);
+                FQNovelResponse<FqIBatchFullResponse> batchResponse = batchFull(itemIds, bookId, false).get();
 
                 if (batchResponse.getCode() != 0 || batchResponse.getData() == null) {
                     return FQNovelResponse.error("获取章节内容失败: " + batchResponse.getMessage());
                 }
 
-                FqIBatchFullResponse batchFullResponse = batchResponse.getData();
-                Map<String, ItemContent> dataMap = batchFullResponse.getData();
-
+                Map<String, ItemContent> dataMap = batchResponse.getData().getData();
                 if (dataMap == null || dataMap.isEmpty()) {
                     return FQNovelResponse.error("未找到章节数据");
                 }
 
-                // 获取第一个章节的内容
-                String chapterId = request.getChapterId();
-                ItemContent itemContent = dataMap.get(chapterId);
-
-                if (itemContent == null) {
-                    // 如果使用chapterId没找到，尝试使用第一个可用的key
-                    itemContent = dataMap.values().iterator().next();
-                    chapterId = dataMap.keySet().iterator().next();
-                }
-
-                if (itemContent == null) {
-                    return FQNovelResponse.error("未找到章节内容");
-                }
-
-                // 解密章节内容
-                String decryptedContent = "";
-                try {
-                    Long contentKeyver = itemContent.getKeyVersion();
-                    String key = registerKeyService.getDecryptionKey(contentKeyver);
-                    decryptedContent = FqCrypto.decryptAndDecompressContent(itemContent.getContent(), key);
-                } catch (Exception e) {
-                    log.error("解密章节内容失败 - chapterId: {}", chapterId, e);
-                    return FQNovelResponse.error("解密章节内容失败: " + e.getMessage());
-                }
-
-                // 从HTML中提取纯文本内容
-                String txtContent = extractTextFromHtml(decryptedContent);
-
-                // 构建章节信息对象
-                FQNovelChapterInfo chapterInfo = new FQNovelChapterInfo();
-                chapterInfo.setChapterId(chapterId);
-                chapterInfo.setBookId(request.getBookId());
-                chapterInfo.setRawContent(decryptedContent);
-                chapterInfo.setTxtContent(txtContent);
-
-                // 从ItemContent中提取标题
-                String title = itemContent.getTitle();
-                if (title == null || title.trim().isEmpty()) {
-                    // 如果title为空，尝试从HTML中提取标题
-                    Pattern titlePattern = Pattern.compile("<h1[^>]*>.*?<blk[^>]*>([^<]*)</blk>.*?</h1>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-                    Matcher titleMatcher = titlePattern.matcher(decryptedContent);
-                    if (titleMatcher.find()) {
-                        title = titleMatcher.group(1).trim();
-                    } else {
-                        title = "章节标题";
+                FQNovelChapterInfo targetChapter = null;
+                for (String itemId : prefetchPlan.itemIds) {
+                    ItemContent itemContent = dataMap.get(itemId);
+                    if (itemContent == null) {
+                        continue;
+                    }
+                    FQNovelChapterInfo chapterInfo = buildChapterInfo(bookId, itemId, itemContent);
+                    redisService.saveChapter(bookId, itemId, chapterInfo);
+                    if (itemId.equals(prefetchPlan.targetItemId)) {
+                        targetChapter = chapterInfo;
                     }
                 }
-                chapterInfo.setTitle(title);
 
-                // 从novelData中提取作者信息（如果可用）
-                FQNovelData novelData = itemContent.getNovelData();
-                chapterInfo.setAuthorName(novelData != null ? novelData.getAuthor() : "未知作者");
-                // 设置其他字段
-                chapterInfo.setWordCount(txtContent.length());
-                chapterInfo.setUpdateTime(System.currentTimeMillis());
+                if (targetChapter == null) {
+                    // 回退：目标章节不在目录定位结果中时，兜底直接拉取请求章节
+                    ItemContent fallbackItem = dataMap.get(requestedChapterId);
+                    if (fallbackItem != null) {
+                        targetChapter = buildChapterInfo(bookId, requestedChapterId, fallbackItem);
+                        redisService.saveChapter(bookId, requestedChapterId, targetChapter);
+                    }
+                }
 
-                return FQNovelResponse.success(chapterInfo);
+                if (targetChapter == null) {
+                    return FQNovelResponse.error("未找到章节内容");
+                }
+                return FQNovelResponse.success(targetChapter);
 
             } catch (Exception e) {
                 log.error("获取章节内容失败 - bookId: {}, chapterId: {}",
@@ -520,6 +502,107 @@ public class FQNovelService {
         }
 
         return textBuilder.toString().trim();
+    }
+
+    private PrefetchPlan buildSingleChapterPrefetchPlan(String bookId, String chapterId) {
+        try {
+            FQDirectoryRequest directoryRequest = new FQDirectoryRequest();
+            directoryRequest.setBookId(bookId);
+            directoryRequest.setBookType(0);
+            directoryRequest.setNeedVersion(true);
+
+            FQNovelResponse<FQDirectoryResponse> directoryResponse = fqSearchService.getBookDirectory(directoryRequest).get();
+            if (directoryResponse.getCode() != 0 || directoryResponse.getData() == null) {
+                return new PrefetchPlan(chapterId, java.util.Collections.singletonList(chapterId));
+            }
+
+            List<FQDirectoryResponse.CatalogItem> catalogItems = directoryResponse.getData().getCatalogData();
+            if (catalogItems == null || catalogItems.isEmpty()) {
+                return new PrefetchPlan(chapterId, java.util.Collections.singletonList(chapterId));
+            }
+
+            int targetIndex = -1;
+            for (int i = 0; i < catalogItems.size(); i++) {
+                if (chapterId.equals(catalogItems.get(i).getItemId())) {
+                    targetIndex = i;
+                    break;
+                }
+            }
+
+            // 兼容传入章节序号（1-based）
+            if (targetIndex < 0) {
+                try {
+                    int chapterPosition = Integer.parseInt(chapterId);
+                    if (chapterPosition > 0 && chapterPosition <= catalogItems.size()) {
+                        targetIndex = chapterPosition - 1;
+                    }
+                } catch (NumberFormatException ignored) {
+                    // ignore
+                }
+            }
+
+            if (targetIndex < 0) {
+                return new PrefetchPlan(chapterId, java.util.Collections.singletonList(chapterId));
+            }
+
+            String targetItemId = catalogItems.get(targetIndex).getItemId();
+            int start = Math.max(0, targetIndex - 1);
+            int end = Math.min(catalogItems.size() - 1, targetIndex + SINGLE_CHAPTER_PREFETCH_SIZE - 1);
+
+            List<String> itemIds = new ArrayList<>();
+            for (int i = start; i <= end; i++) {
+                String itemId = catalogItems.get(i).getItemId();
+                if (itemId != null && !itemId.trim().isEmpty()) {
+                    itemIds.add(itemId);
+                }
+            }
+            if (itemIds.isEmpty()) {
+                itemIds.add(targetItemId);
+            }
+            return new PrefetchPlan(targetItemId, itemIds);
+        } catch (Exception e) {
+            log.warn("构建章节预取计划失败 - bookId: {}, chapterId: {}", bookId, chapterId, e);
+            return new PrefetchPlan(chapterId, java.util.Collections.singletonList(chapterId));
+        }
+    }
+
+    private FQNovelChapterInfo buildChapterInfo(String bookId, String chapterId, ItemContent itemContent) throws Exception {
+        String key = registerKeyService.getDecryptionKey(itemContent.getKeyVersion());
+        String decryptedContent = FqCrypto.decryptAndDecompressContent(itemContent.getContent(), key);
+        String txtContent = extractTextFromHtml(decryptedContent);
+
+        String title = itemContent.getTitle();
+        if (title == null || title.trim().isEmpty()) {
+            Pattern titlePattern = Pattern.compile("<h1[^>]*>.*?<blk[^>]*>([^<]*)</blk>.*?</h1>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+            Matcher titleMatcher = titlePattern.matcher(decryptedContent);
+            if (titleMatcher.find()) {
+                title = titleMatcher.group(1).trim();
+            } else {
+                title = "章节标题";
+            }
+        }
+
+        FQNovelData novelData = itemContent.getNovelData();
+        FQNovelChapterInfo chapterInfo = new FQNovelChapterInfo();
+        chapterInfo.setChapterId(chapterId);
+        chapterInfo.setBookId(bookId);
+        chapterInfo.setRawContent(decryptedContent);
+        chapterInfo.setTxtContent(txtContent);
+        chapterInfo.setTitle(title);
+        chapterInfo.setAuthorName(novelData != null ? novelData.getAuthor() : "未知作者");
+        chapterInfo.setWordCount(txtContent.length());
+        chapterInfo.setUpdateTime(System.currentTimeMillis());
+        return chapterInfo;
+    }
+
+    private static final class PrefetchPlan {
+        private final String targetItemId;
+        private final List<String> itemIds;
+
+        private PrefetchPlan(String targetItemId, List<String> itemIds) {
+            this.targetItemId = targetItemId;
+            this.itemIds = itemIds;
+        }
     }
 
     /**

@@ -38,9 +38,9 @@ spring:
         keep-alive: 60s
         max-size: 8
   redis:
-    host: 60.205.188.67
-    port: 26586
-    password: HT5aRYBK2HpReaQuYkLcg
+    host: 127.0.0.1
+    port: 6379
+    password:
     database: 0
     timeout: 5000ms
     lettuce:

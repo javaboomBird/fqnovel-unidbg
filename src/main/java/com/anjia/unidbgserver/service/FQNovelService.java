@@ -146,10 +146,17 @@ public class FQNovelService {
                             ? responseBody.substring(0, 500) + "..." : responseBody;
                         log.warn("GZIP 解压失败，响应为明文或错误JSON。attempt={}, error={}, responseBody={}", attempt, em, bodySnippet);
 
-                        // 检测到"ILLEGAL_ACCESS"错误，立即返回错误
+                        // 检测到"ILLEGAL_ACCESS"错误，触发自动换设备重试
                         if (responseBody != null && responseBody.contains("ILLEGAL_ACCESS")) {
-                            log.warn("检测到非法访问响应，立即跳出循环。attempt={}", attempt);
-                            return FQNovelResponse.error("批量获取章节内容失败: 非法访问，请手动更新设备信息");
+                            if (attempt < maxAttempts) {
+                                log.warn("检测到非法访问，触发自动重新注册设备。attempt={}", attempt);
+                                boolean reRegistered = deviceRegisterService.reRegister();
+                                this.defaultFqVariable = null;
+                                log.info("重注册结果: {}, 使用新设备重试", reRegistered);
+                                continue;
+                            }
+                            log.warn("检测到非法访问，已达最大重试次数。attempt={}", attempt);
+                            return FQNovelResponse.error("批量获取章节内容失败: 非法访问，设备自动重注册后仍被拒绝");
                         }
                         // 非GZIP但 responseBody 不为空时，继续尝试当作明文 JSON 解析
                     }
@@ -165,8 +172,15 @@ public class FQNovelService {
 
                     // 解析响应
                     if (responseBody.contains("\"code\":110") || responseBody.contains("ILLEGAL_ACCESS")) {
-                        log.warn("检测到ILLEGAL_ACCESS，建议手动更新设备信息。attempt={}", attempt);
-                        return FQNovelResponse.error("批量获取章节内容失败: ILLEGAL_ACCESS，请手动更新设备信息");
+                        if (attempt < maxAttempts) {
+                            log.warn("检测到ILLEGAL_ACCESS，触发自动重新注册设备。attempt={}", attempt);
+                            boolean reRegistered = deviceRegisterService.reRegister();
+                            this.defaultFqVariable = null;
+                            log.info("重注册结果: {}, 使用新设备重试", reRegistered);
+                            continue;
+                        }
+                        log.warn("检测到ILLEGAL_ACCESS，已达最大重试次数。attempt={}", attempt);
+                        return FQNovelResponse.error("批量获取章节内容失败: ILLEGAL_ACCESS，设备自动重注册后仍被拒绝");
                     }
                     FqIBatchFullResponse batchResponse = objectMapper.readValue(responseBody, FqIBatchFullResponse.class);
                     return FQNovelResponse.success(batchResponse);
@@ -176,8 +190,15 @@ public class FQNovelService {
                     boolean parseEmpty = message.contains("No content to map due to end-of-input");
                     boolean gzipErr = message.contains("Not in GZIP format");
                     if (gzipErr) {
-                        log.warn("检测到GZIP解析异常，建议手动更新设备信息。attempt={}, error={}", attempt, message);
-                        return FQNovelResponse.error("批量获取章节内容失败: GZIP解析异常，请手动更新设备信息");
+                        if (attempt < maxAttempts) {
+                            log.warn("检测到GZIP解析异常（可能被风控），触发自动重新注册设备。attempt={}, error={}", attempt, message);
+                            boolean reRegistered = deviceRegisterService.reRegister();
+                            this.defaultFqVariable = null;
+                            log.info("重注册结果: {}, 使用新设备重试", reRegistered);
+                            continue;
+                        }
+                        log.warn("检测到GZIP解析异常，已达最大重试次数。attempt={}", attempt);
+                        return FQNovelResponse.error("批量获取章节内容失败: GZIP解析异常，设备自动重注册后仍被拒绝");
                     }
                     if (parseEmpty) {
                         if (attempt < maxAttempts) {

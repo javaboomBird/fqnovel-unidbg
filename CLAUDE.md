@@ -17,12 +17,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # 启动服务（端口 9999）
 java -jar target/unidbg-boot-server-0.0.1-SNAPSHOT.jar
 
-# 一键重启脚本（重新打包 + 停止旧进程 + 启动新进程）
+# 一键重启脚本（重新打包 + 停止旧进程 + 启动新进程，仅本地使用）
 bash restart.sh
 
 # 运行测试（需显式开启）
 ./mvnw test -Dmaven.test.skip=false
 ```
+
+## 部署到阿里云 ECS
+
+使用 `deploy.sh` 一键构建并部署到远程 Docker 容器：
+
+```bash
+bash deploy.sh
+```
+
+流程：本地构建 JAR → SCP 上传至 ECS → `docker cp` 注入容器 → `docker restart`，全程约 30 秒。
+
+**换机器部署**时，私钥路径不同，通过环境变量指定：
+
+```bash
+DEPLOY_PEM=/path/to/your/cx.pem bash deploy.sh
+```
+
+**脚本配置项**（`deploy.sh` 顶部）：
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `ECS_HOST` | `root@8.129.129.59` | ECS 登录地址 |
+| `ECS_PEM` | `$DEPLOY_PEM` 或 `~/Downloads/aliyun/cx.pem` | SSH 私钥路径 |
+| `CONTAINER` | `fqnovel-unidbg` | Docker 容器名 |
+| `REMOTE_DIR` | `/opt/fqnovel` | ECS 上的部署目录 |
 
 ## 核心架构
 

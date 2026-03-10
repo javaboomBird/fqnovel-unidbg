@@ -29,7 +29,7 @@ public class RedisService {
 
     private static final String CHAPTER_KEY_PREFIX = "novel:chapter:";
     private static final String BOOK_CHAPTERS_KEY_PREFIX = "novel:book:chapters:";
-    private static final int DEFAULT_EXPIRE_DAYS = 7; // 默认7天过期
+    private static final int DEFAULT_EXPIRE_DAYS = 180; // 180天过期，降低重复拉取风控频率
 
     /**
      * 保存章节信息到Redis
@@ -258,31 +258,53 @@ public class RedisService {
     public Set<String> getAllBookKeys() {
         try {
             Set<String> allKeys = new java.util.HashSet<>();
-            
+
             // 获取所有书籍信息key
             Set<String> bookInfoKeys = redisTemplate.keys("book:*:info");
             if (bookInfoKeys != null) {
                 allKeys.addAll(bookInfoKeys);
             }
-            
+
             // 获取所有书籍章节列表key
             Set<String> bookChaptersKeys = redisTemplate.keys("book:*:chapters");
             if (bookChaptersKeys != null) {
                 allKeys.addAll(bookChaptersKeys);
             }
-            
+
             // 获取所有novel章节列表key
             Set<String> novelChaptersKeys = redisTemplate.keys("novel:book:chapters:*");
             if (novelChaptersKeys != null) {
                 allKeys.addAll(novelChaptersKeys);
             }
-            
+
             log.debug("获取到 {} 个书籍相关的Redis key", allKeys.size());
             return allKeys;
-            
+
         } catch (Exception e) {
             log.error("获取所有书籍key失败", e);
             return new java.util.HashSet<>();
         }
+    }
+
+    /**
+     * 将书籍ID添加到本地导入书籍索引
+     */
+    public void addLocalBookIndex(String bookId) {
+        redisTemplate.opsForSet().add("local:books", bookId);
+    }
+
+    /**
+     * 获取所有本地导入书籍的ID列表
+     */
+    public java.util.Set<String> getLocalBookIds() {
+        java.util.Set<String> result = redisTemplate.opsForSet().members("local:books");
+        return result != null ? result : new java.util.HashSet<>();
+    }
+
+    /**
+     * 判断指定bookId是否为本地导入书籍
+     */
+    public boolean isLocalBook(String bookId) {
+        return Boolean.TRUE.equals(redisTemplate.opsForSet().isMember("local:books", bookId));
     }
 }

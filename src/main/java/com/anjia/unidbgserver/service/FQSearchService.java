@@ -36,6 +36,9 @@ public class FQSearchService {
     @Resource
     private FQApiUtils fqApiUtils;
 
+    @Resource
+    private RedisService redisService;
+
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -96,6 +99,9 @@ public class FQSearchService {
                 if (secondResponse.getCode() == 0 && secondResponse.getData() != null ){
                     secondResponse.getData().setSearchId(searchId);
                 }
+
+                // 混入本地导入书籍
+                prependLocalBooks(secondResponse, searchRequest.getQuery());
 
                 return secondResponse;
 
@@ -302,7 +308,10 @@ public class FQSearchService {
                 int tabType = searchRequest.getTabType(); // 从请求获取需要的tab_type
                 FQSearchResponse searchResponse = parseSearchResponse(jsonResponse,tabType);
 
-                return FQNovelResponse.success(searchResponse);
+                FQNovelResponse<FQSearchResponse> result = FQNovelResponse.success(searchResponse);
+                // 混入本地导入书籍
+                prependLocalBooks(result, searchRequest.getQuery());
+                return result;
 
             } catch (Exception e) {
                 log.error("搜索书籍失败 - query: {}", searchRequest.getQuery(), e);
@@ -320,6 +329,13 @@ public class FQSearchService {
     public CompletableFuture<FQNovelResponse<FQDirectoryResponse>> getBookDirectory(FQDirectoryRequest directoryRequest) {
         return CompletableFuture.supplyAsync(() -> {
             try {
+                String bookId = directoryRequest.getBookId();
+
+                // 本地导入书籍：直接从 Redis 构建目录，无需调用远程 API
+                if (bookId != null && redisService.isLocalBook(bookId)) {
+                    return buildLocalDirectory(bookId);
+                }
+
                 FqVariable var = getDefaultFqVariable();
 
                 // 构建目录URL和参数
@@ -409,6 +425,79 @@ public class FQSearchService {
         }
         
         log.info("章节列表增强完成 - 总章节数: {}", totalChapters);
+    }
+
+    /**
+     * 从 Redis 缓存构建本地导入书籍的目录响应
+     */
+    private FQNovelResponse<FQDirectoryResponse> buildLocalDirectory(String bookId) {
+        List<String> chapterIds = redisService.getChapterList(bookId);
+        if (chapterIds == null || chapterIds.isEmpty()) {
+            return FQNovelResponse.error("本地书籍目录为空 - bookId: " + bookId);
+        }
+
+        List<FQDirectoryResponse.ItemData> itemDataList = new ArrayList<>();
+        for (int i = 0; i < chapterIds.size(); i++) {
+            String chapterId = chapterIds.get(i);
+            FQDirectoryResponse.ItemData item = new FQDirectoryResponse.ItemData();
+            item.setItemId(chapterId);
+            item.setChapterIndex(i + 1);
+            item.setSortOrder(i + 1);
+            item.setIsFree(true);
+            item.setIsLatest(i == chapterIds.size() - 1);
+            // 尝试从 Redis 获取章节标题
+            com.anjia.unidbgserver.dto.FQNovelChapterInfo ci = redisService.getChapter(bookId, chapterId);
+            item.setTitle(ci != null && ci.getTitle() != null ? ci.getTitle() : "第" + (i + 1) + "章");
+            if (ci != null && ci.getWordCount() != null) {
+                item.setChapterWordNumber(ci.getWordCount());
+            }
+            itemDataList.add(item);
+        }
+
+        FQDirectoryResponse directoryResponse = new FQDirectoryResponse();
+        directoryResponse.setItemDataList(itemDataList);
+        log.info("本地书籍目录构建完成 - bookId: {}, 章节数: {}", bookId, itemDataList.size());
+        return FQNovelResponse.success(directoryResponse);
+    }
+
+    /**
+     * 将匹配本地导入书籍的结果前置插入搜索响应
+     */
+    private void prependLocalBooks(FQNovelResponse<FQSearchResponse> response, String query) {
+        if (response == null || response.getData() == null) return;
+        List<FQSearchResponse.BookItem> localBooks = searchLocalBooks(query);
+        if (localBooks.isEmpty()) return;
+
+        List<FQSearchResponse.BookItem> existing = response.getData().getBooks();
+        List<FQSearchResponse.BookItem> merged = new ArrayList<>(localBooks);
+        if (existing != null) merged.addAll(existing);
+        response.getData().setBooks(merged);
+        log.info("搜索结果混入本地书籍 {} 本 - query: {}", localBooks.size(), query);
+    }
+
+    /**
+     * 搜索本地导入书籍，返回匹配 query 的 BookItem 列表
+     */
+    private List<FQSearchResponse.BookItem> searchLocalBooks(String query) {
+        List<FQSearchResponse.BookItem> result = new ArrayList<>();
+        if (query == null || query.trim().isEmpty()) return result;
+        String q = query.trim().toLowerCase();
+        for (String bookId : redisService.getLocalBookIds()) {
+            FQNovelBookInfo info = redisService.getBookInfo(bookId);
+            if (info == null) continue;
+            String name = info.getBookName() != null ? info.getBookName().toLowerCase() : "";
+            String auth = info.getAuthor() != null ? info.getAuthor().toLowerCase() : "";
+            if (name.contains(q) || auth.contains(q)) {
+                FQSearchResponse.BookItem item = new FQSearchResponse.BookItem();
+                item.setBookId(bookId);
+                item.setBookName(info.getBookName());
+                item.setAuthor(info.getAuthor());
+                item.setDescription(info.getDescription());
+                item.setStatus(info.getStatus() != null ? String.valueOf(info.getStatus()) : "1");
+                result.add(item);
+            }
+        }
+        return result;
     }
 
     /**

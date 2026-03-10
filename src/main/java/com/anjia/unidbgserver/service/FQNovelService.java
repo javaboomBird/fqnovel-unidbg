@@ -690,65 +690,105 @@ public class FQNovelService {
                     return FQNovelResponse.error("无法获取章节对应的itemIds，请检查章节范围是否有效");
                 }
 
-                // 调用批量获取API
-                String itemIdsStr = String.join(",", itemIds);
-                FQNovelResponse<FqIBatchFullResponse> batchResponse = batchFull(itemIdsStr, request.getBookId(), true).get();
+                String bookId = request.getBookId();
 
-                if (batchResponse.getCode() != 0 || batchResponse.getData() == null) {
-                    return FQNovelResponse.error("获取批量章节内容失败: " + batchResponse.getMessage());
+                // 优先从 Redis 加载已缓存章节，只对未缓存的章节调用 API
+                Map<String, FQNovelChapterInfo> cachedMap = new LinkedHashMap<>();
+                List<String> uncachedItemIds = new ArrayList<>();
+                for (String itemId : itemIds) {
+                    FQNovelChapterInfo cached = redisService.getChapter(bookId, itemId);
+                    if (cached != null) {
+                        cachedMap.put(itemId, cached);
+                    } else {
+                        uncachedItemIds.add(itemId);
+                    }
                 }
+                log.info("批量章节 Redis 命中 {}/{}, 需要 API 拉取 {}",
+                    cachedMap.size(), itemIds.size(), uncachedItemIds.size());
 
-                FqIBatchFullResponse batchFullResponse = batchResponse.getData();
-                Map<String, ItemContent> dataMap = batchFullResponse.getData();
+                // 只对未缓存的章节调用 API
+                Map<String, ItemContent> dataMap = new HashMap<>();
+                FQNovelData firstNovelData = null;
+                if (!uncachedItemIds.isEmpty()) {
+                    String itemIdsStr = String.join(",", uncachedItemIds);
+                    FQNovelResponse<FqIBatchFullResponse> batchResponse = batchFull(itemIdsStr, bookId, true).get();
 
-                if (dataMap == null) {
-                    dataMap = new HashMap<>();
+                    if (batchResponse.getCode() != 0 || batchResponse.getData() == null) {
+                        // API 失败时，若有缓存数据则继续；否则报错
+                        if (cachedMap.isEmpty()) {
+                            return FQNovelResponse.error("获取批量章节内容失败: " + batchResponse.getMessage());
+                        }
+                        log.warn("API 拉取部分章节失败，仅返回缓存章节: {}", batchResponse.getMessage());
+                    } else {
+                        Map<String, ItemContent> apiData = batchResponse.getData().getData();
+                        if (apiData != null) {
+                            dataMap.putAll(apiData);
+                            // 记录 novelData 供书籍信息使用
+                            for (ItemContent ic : apiData.values()) {
+                                if (ic.getNovelData() != null) { firstNovelData = ic.getNovelData(); break; }
+                            }
+                        }
+                    }
                 }
 
                 // 构建响应
                 FQBatchChapterResponse response = new FQBatchChapterResponse();
-                response.setBookId(request.getBookId());
+                response.setBookId(bookId);
                 response.setRequestedRange(request.getChapterRange());
                 response.setTotalRequested(chapterIds.size());
-                // 获取第一个itemId的novelData信息
-                FQNovelData novelData = dataMap.get(itemIds.get(0)).getNovelData();
 
-                // 构建书籍信息 (简化版本)
+                // 构建书籍信息（优先从 API 结果，其次从缓存推断）
                 FQNovelBookInfo bookInfo = new FQNovelBookInfo();
-                bookInfo.setBookId(request.getBookId());
-                bookInfo.setBookName(novelData.getBookName());
-                bookInfo.setAuthor(novelData.getAuthor());
-                bookInfo.setCoverUrl(novelData.getThumbUrl());
-                bookInfo.setStatus(novelData.getStatus());
-                // 使用content_chapter_number字段获取章节数，而不是wordNumber（字数）
-                String contentChapterNumber = novelData.getContentChapterNumber();
-                if (contentChapterNumber != null && !contentChapterNumber.isEmpty()) {
-                    try {
-                        bookInfo.setTotalChapters(Integer.parseInt(contentChapterNumber));
-                    } catch (NumberFormatException e) {
-                        log.warn("解析章节数失败 - contentChapterNumber: {}", contentChapterNumber);
-                        bookInfo.setTotalChapters(0);
+                bookInfo.setBookId(bookId);
+                if (firstNovelData != null) {
+                    bookInfo.setBookName(firstNovelData.getBookName());
+                    bookInfo.setAuthor(firstNovelData.getAuthor());
+                    bookInfo.setCoverUrl(firstNovelData.getThumbUrl());
+                    bookInfo.setStatus(firstNovelData.getStatus());
+                    String contentChapterNumber = firstNovelData.getContentChapterNumber();
+                    if (contentChapterNumber != null && !contentChapterNumber.isEmpty()) {
+                        try { bookInfo.setTotalChapters(Integer.parseInt(contentChapterNumber)); }
+                        catch (NumberFormatException e) { bookInfo.setTotalChapters(0); }
                     }
-                } else {
-                    bookInfo.setTotalChapters(0);
+                } else if (!cachedMap.isEmpty()) {
+                    FQNovelChapterInfo sample = cachedMap.values().iterator().next();
+                    bookInfo.setBookName("");
+                    bookInfo.setAuthor(sample.getAuthorName() != null ? sample.getAuthorName() : "");
                 }
                 response.setBookInfo(bookInfo);
 
-                // 处理每个章节
+                // 处理每个章节（合并缓存 + API 结果）
                 Map<String, FQBatchChapterInfo> chaptersMap = new LinkedHashMap<>();
                 int successCount = 0;
 
-                for (String itemId : itemIds) {
+                for (int idx = 0; idx < itemIds.size(); idx++) {
+                    String itemId = itemIds.get(idx);
+                    String chapterKey = (isChapterPositions(chapterIds) && idx < chapterIds.size())
+                        ? chapterIds.get(idx) : itemId;
                     try {
-                        ItemContent itemContent = dataMap.get(itemId);
+                        // 先查缓存
+                        FQNovelChapterInfo cachedChapter = cachedMap.get(itemId);
+                        if (cachedChapter != null) {
+                            FQBatchChapterInfo chapterInfo = new FQBatchChapterInfo();
+                            chapterInfo.setChapterName(cachedChapter.getTitle());
+                            chapterInfo.setRawContent(cachedChapter.getRawContent());
+                            chapterInfo.setTxtContent(cachedChapter.getTxtContent());
+                            chapterInfo.setWordCount(cachedChapter.getWordCount() != null ? cachedChapter.getWordCount() : 0);
+                            chapterInfo.setIsFree(true);
+                            chaptersMap.put(chapterKey, chapterInfo);
+                            successCount++;
+                            continue;
+                        }
 
+                        // 从 API 结果构建
+                        ItemContent itemContent = dataMap.get(itemId);
                         if (itemContent == null) {
                             log.warn("未找到章节内容 - itemId: {}", itemId);
                             continue;
                         }
 
                         // 解密章节内容
-                        String decryptedContent = "";
+                        String decryptedContent;
                         try {
                             Long contentKeyver = itemContent.getKeyVersion();
                             String key = registerKeyService.getDecryptionKey(contentKeyver);
@@ -758,47 +798,37 @@ public class FQNovelService {
                             continue;
                         }
 
-                        // 提取纯文本内容
                         String txtContent = extractTextFromHtml(decryptedContent);
-
-                        // 提取章节标题
                         String title = itemContent.getTitle();
                         if (title == null || title.trim().isEmpty()) {
-                            // 从HTML中提取标题
                             Pattern titlePattern = Pattern.compile("<h1[^>]*>.*?<blk[^>]*>([^<]*)</blk>.*?</h1>",
                                 Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
                             Matcher titleMatcher = titlePattern.matcher(decryptedContent);
-                            if (titleMatcher.find()) {
-                                title = titleMatcher.group(1).trim();
-                            } else {
-                                title = "章节 " + itemId;
-                            }
+                            title = titleMatcher.find() ? titleMatcher.group(1).trim() : "章节 " + itemId;
                         }
 
-                        // 构建章节信息
                         FQBatchChapterInfo chapterInfo = new FQBatchChapterInfo();
                         chapterInfo.setChapterName(title);
                         chapterInfo.setRawContent(decryptedContent);
                         chapterInfo.setTxtContent(txtContent);
                         chapterInfo.setWordCount(txtContent.length());
-                        chapterInfo.setIsFree(true); // 默认为免费，可以后续扩展
-
-                        // 使用对应的章节位置作为key（如果是章节位置模式）
-                        String chapterKey;
-                        if (isChapterPositions(chapterIds)) {
-                            // 找到这个itemId对应的章节位置
-                            int itemIndex = itemIds.indexOf(itemId);
-                            if (itemIndex >= 0 && itemIndex < chapterIds.size()) {
-                                chapterKey = chapterIds.get(itemIndex);
-                            } else {
-                                chapterKey = itemId;
-                            }
-                        } else {
-                            chapterKey = itemId;
-                        }
-
+                        chapterInfo.setIsFree(true);
                         chaptersMap.put(chapterKey, chapterInfo);
                         successCount++;
+
+                        // 保存到 Redis
+                        FQNovelChapterInfo toCache = new FQNovelChapterInfo();
+                        toCache.setChapterId(itemId);
+                        toCache.setBookId(bookId);
+                        toCache.setTitle(title);
+                        toCache.setRawContent(decryptedContent);
+                        toCache.setTxtContent(txtContent);
+                        toCache.setWordCount(txtContent.length());
+                        toCache.setUpdateTime(System.currentTimeMillis());
+                        if (itemContent.getNovelData() != null) {
+                            toCache.setAuthorName(itemContent.getNovelData().getAuthor());
+                        }
+                        redisService.saveChapter(bookId, itemId, toCache);
 
                     } catch (Exception e) {
                         log.error("处理章节失败 - itemId: {}", itemId, e);

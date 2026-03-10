@@ -53,6 +53,9 @@ public class FQNovelService {
     private DeviceManagementService deviceManagementService;
 
     @Resource
+    private FQDeviceRegisterService deviceRegisterService;
+
+    @Resource
     private RedisService redisService;
 
     private final RestTemplate restTemplate = new RestTemplate();
@@ -106,9 +109,21 @@ public class FQNovelService {
                     HttpEntity<String> entity = new HttpEntity<>(httpHeaders);
                     ResponseEntity<byte[]> response = restTemplate.exchange(fullUrl, HttpMethod.GET, entity, byte[].class);
 
+                    // 诊断：记录HTTP状态码和响应头，帮助定位空响应原因
+                    byte[] respBytes = response.getBody();
+                    log.warn("batch_full响应诊断 - 状态码: {}, body长度: {}, Content-Type: {}, Content-Encoding: {}",
+                        response.getStatusCode(),
+                        respBytes != null ? respBytes.length : "(null)",
+                        response.getHeaders().getContentType(),
+                        response.getHeaders().get("Content-Encoding"));
+
+                    if (respBytes == null || respBytes.length == 0) {
+                        throw new RuntimeException("No content to map due to end-of-input");
+                    }
+
                     // 解压缩 GZIP 响应体
                     String responseBody = "";
-                    try (GZIPInputStream gzipInputStream = new GZIPInputStream(new ByteArrayInputStream(response.getBody()))) {
+                    try (GZIPInputStream gzipInputStream = new GZIPInputStream(new ByteArrayInputStream(respBytes))) {
                         ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
                         byte[] buffer = new byte[1024];
                         int length;
@@ -117,31 +132,26 @@ public class FQNovelService {
                         }
                         responseBody = new String(byteArrayOutputStream.toByteArray(), StandardCharsets.UTF_8);
                     } catch (Exception e) {
-                        // 可能不是GZIP或响应体为空
-                        byte[] raw = response.getBody();
-                        if (raw != null) {
+                        // 可能不是GZIP或响应体为空，尝试作为明文读取
+                        if (respBytes != null) {
                             try {
-                                responseBody = new String(raw, StandardCharsets.UTF_8);
+                                responseBody = new String(respBytes, StandardCharsets.UTF_8);
                             } catch (Exception ignored) {
                                 // ignore
                             }
                         }
-                        log.warn("GZIP 解压失败或非GZIP响应，尝试直接读取文本。", e);
-
-                        // 检查错误类型，如果是关键错误则立即跳出循环
                         String em = e.getMessage() != null ? e.getMessage() : "";
-                        
-                        // 检测到"Not in GZIP format"错误，立即返回错误避免无限循环
-                        if (em.contains("Not in GZIP format")) {
-                            log.warn("检测到非GZIP格式响应，立即跳出循环避免无限重试。attempt={}, error={}", attempt, em);
-                            return FQNovelResponse.error("批量获取章节内容失败: 响应格式异常，请手动更新设备信息");
-                        }
-                        
+                        // 记录实际响应体，便于诊断 API 返回的具体错误内容
+                        String bodySnippet = responseBody != null && responseBody.length() > 500
+                            ? responseBody.substring(0, 500) + "..." : responseBody;
+                        log.warn("GZIP 解压失败，响应为明文或错误JSON。attempt={}, error={}, responseBody={}", attempt, em, bodySnippet);
+
                         // 检测到"ILLEGAL_ACCESS"错误，立即返回错误
                         if (responseBody != null && responseBody.contains("ILLEGAL_ACCESS")) {
-                            log.warn("检测到非法访问响应，立即跳出循环。attempt={}, responseBody={}", attempt, responseBody);
+                            log.warn("检测到非法访问响应，立即跳出循环。attempt={}", attempt);
                             return FQNovelResponse.error("批量获取章节内容失败: 非法访问，请手动更新设备信息");
                         }
+                        // 非GZIP但 responseBody 不为空时，继续尝试当作明文 JSON 解析
                     }
 
                     if (responseBody == null) {
@@ -170,8 +180,15 @@ public class FQNovelService {
                         return FQNovelResponse.error("批量获取章节内容失败: GZIP解析异常，请手动更新设备信息");
                     }
                     if (parseEmpty) {
-                        log.warn("检测到空响应导致解析失败，建议手动更新设备信息。attempt={}, error={}", attempt, message);
-                        return FQNovelResponse.error("批量获取章节内容失败: 空响应，请手动更新设备信息");
+                        if (attempt < maxAttempts) {
+                            log.warn("检测到空响应，触发自动重新注册设备。attempt={}", attempt);
+                            boolean reRegistered = deviceRegisterService.reRegister();
+                            this.defaultFqVariable = null;
+                            log.info("重注册结果: {}, 使用新设备重试", reRegistered);
+                            continue;
+                        }
+                        log.warn("自动重注册后仍返回空响应。attempt={}", attempt);
+                        return FQNovelResponse.error("批量获取章节内容失败: 设备自动重注册后仍被拒绝，请检查网络");
                     }
 
                     log.error("批量获取章节内容失败 - itemIds: {}", itemIds, e);

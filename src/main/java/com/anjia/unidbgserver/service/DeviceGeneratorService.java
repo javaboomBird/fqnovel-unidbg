@@ -182,6 +182,11 @@ public class DeviceGeneratorService {
                 .versionCode("68132")
                 .versionName("6.8.1.32")
                 .updateVersionCode("68132")
+                .openudid(openudid)
+                .sigHash(sigHash)
+                .ipv6Address(ipv6Address)
+                .clientudid(clientudid)
+                .apkFirstInstallTime(installTime)
                 .build();
                 
         } catch (Exception e) {

@@ -98,4 +98,29 @@ public class DeviceInfo {
      * 更新版本代码
      */
     private String updateVersionCode;
+
+    /**
+     * OpenUDID（注册payload使用）
+     */
+    private String openudid;
+
+    /**
+     * 签名Hash（注册payload使用）
+     */
+    private String sigHash;
+
+    /**
+     * IPv6地址（注册payload使用）
+     */
+    private String ipv6Address;
+
+    /**
+     * 客户端UDID（注册payload使用）
+     */
+    private String clientudid;
+
+    /**
+     * 首次安装时间戳ms（注册payload使用）
+     */
+    private Long apkFirstInstallTime;
 }

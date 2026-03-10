@@ -204,6 +204,14 @@ public class FQRegisterKeyService {
     }
 
     /**
+     * 重置FqVariable缓存，使下次请求重新从FQApiProperties读取最新设备信息
+     */
+    public void resetFqVariable() {
+        this.defaultFqVariable = null;
+        log.info("FQRegisterKeyService FqVariable缓存已重置");
+    }
+
+    /**
      * 获取缓存状态信息
      */
     public Map<String, Object> getCacheStatus() {

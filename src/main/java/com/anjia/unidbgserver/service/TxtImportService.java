@@ -47,11 +47,13 @@ public class TxtImportService {
         String[] lines = text.split("\n", 20);
         for (String line : lines) {
             line = line.trim();
-            if (line.startsWith("小说名：") || line.startsWith("小说名:")) {
+            if (line.startsWith("小说名：") || line.startsWith("小说名:") ||
+                    line.startsWith("书名：") || line.startsWith("书名:")) {
                 bookName = line.substring(line.indexOf('：') >= 0 ? line.indexOf('：') + 1 : line.indexOf(':') + 1).trim();
             } else if (line.startsWith("作者：") || line.startsWith("作者:")) {
                 author = line.substring(line.indexOf('：') >= 0 ? line.indexOf('：') + 1 : line.indexOf(':') + 1).trim();
-            } else if (line.startsWith("内容简介：") || line.startsWith("内容简介:")) {
+            } else if (line.startsWith("内容简介：") || line.startsWith("内容简介:") ||
+                    line.startsWith("简介：") || line.startsWith("简介:")) {
                 description = line.substring(line.indexOf('：') >= 0 ? line.indexOf('：') + 1 : line.indexOf(':') + 1).trim();
             }
         }
@@ -145,6 +147,11 @@ public class TxtImportService {
             String stripped = rawContent.replaceFirst("^\\s+", "");
             if (stripped.startsWith(title)) {
                 rawContent = stripped.substring(title.length()).trim();
+            }
+
+            // 跳过空内容的章节（重复标题变体中的首次占位行）
+            if (rawContent.isBlank()) {
+                continue;
             }
 
             chapters.add(new Chapter(title, rawContent));

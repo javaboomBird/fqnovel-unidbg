@@ -25,6 +25,10 @@ fq:
       aid: '1967'
     user-agent: com.dragon.read.oversea.gp/68132 (Linux; U; Android 11; zh_CN; M2007J1SC;
       Build/V394IR;tt-ok/3.12.13.4-tiktok)
+  gateway:
+    base-url: https://linjinpeng-tomato-gateway.hf.space
+    token: fanqie123
+    timeout-seconds: 1800
 spring:
   application:
     name: unidbg-boot-server

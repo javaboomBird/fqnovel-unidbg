@@ -570,9 +570,16 @@ public class DeviceManagementService {
             } catch (Exception e) {
                 log.warn("无法通过ClassPathResource获取配置文件路径: {}", e.getMessage());
             }
-            
+
+            // 方法2: Docker 容器内外挂配置文件路径
+            String dockerConfigPath = "/app/config/application.yml";
+            if (new File(dockerConfigPath).exists()) {
+                log.info("使用 Docker 挂载配置文件: {}", dockerConfigPath);
+                return dockerConfigPath;
+            }
+
             try {
-                // 方法2: 通过系统属性获取
+                // 方法3: 通过系统属性获取
                 String userDir = System.getProperty("user.dir");
                 String configPath = userDir + "/src/main/resources/application.yml";
                 File configFile = new File(configPath);
@@ -583,9 +590,9 @@ public class DeviceManagementService {
             } catch (Exception e) {
                 log.warn("无法通过项目根目录获取配置文件路径: {}", e.getMessage());
             }
-            
+
             try {
-                // 方法3: 通过当前工作目录获取
+                // 方法4: 通过当前工作目录获取
                 String currentDir = System.getProperty("user.dir");
                 String configPath = currentDir + "/src/main/resources/application.yml";
                 File configFile = new File(configPath);

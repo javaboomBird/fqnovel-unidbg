@@ -504,14 +504,23 @@ public class FQSearchService {
      * 解压缩GZIP响应
      */
     private String decompressGzipResponse(byte[] gzipData) throws Exception {
-        try (GZIPInputStream gzipInputStream = new GZIPInputStream(new ByteArrayInputStream(gzipData))) {
-            ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-            byte[] buffer = new byte[1024];
-            int length;
-            while ((length = gzipInputStream.read(buffer)) != -1) {
-                byteArrayOutputStream.write(buffer, 0, length);
+        if (gzipData == null || gzipData.length == 0) {
+            return "";
+        }
+        // 检查是否为 GZIP magic bytes (0x1F 0x8B)
+        if (gzipData.length >= 2 && (gzipData[0] & 0xFF) == 0x1F && (gzipData[1] & 0xFF) == 0x8B) {
+            try (GZIPInputStream gzipInputStream = new GZIPInputStream(new ByteArrayInputStream(gzipData))) {
+                ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+                byte[] buffer = new byte[1024];
+                int length;
+                while ((length = gzipInputStream.read(buffer)) != -1) {
+                    byteArrayOutputStream.write(buffer, 0, length);
+                }
+                return new String(byteArrayOutputStream.toByteArray(), StandardCharsets.UTF_8);
             }
-            return new String(byteArrayOutputStream.toByteArray(), StandardCharsets.UTF_8);
+        } else {
+            // 非 GZIP，直接当文本返回
+            return new String(gzipData, StandardCharsets.UTF_8);
         }
     }
 
